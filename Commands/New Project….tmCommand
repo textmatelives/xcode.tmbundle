@@ -5,18 +5,18 @@
 	<key>beforeRunningCommand</key>
 	<string>nop</string>
 	<key>command</key>
-	<string>#!/usr/bin/env ruby18 -wKU
+	<string>#!/usr/bin/env ruby -wEutf-8
 
 SUPPORT       = ENV['TM_SUPPORT_PATH']
 MATE          = "#{SUPPORT}/bin/mate"
 
 require "#{SUPPORT}/lib/osx/plist"
+require "#{SUPPORT}/private/plist" # Hash#to_plist, used to talk to $DIALOG below
 require "#{SUPPORT}/lib/escape"
 
 require "cgi"
 require "fileutils"
 require "find"
-require "iconv"
 
 TEMPLATE_DIRS = [
   '/Library/Application Support/Apple/Developer Tools/Project Templates',
@@ -34,28 +34,28 @@ module ProcessTemplate
   end
 
   def expand_file(file, variables)
-    data = IO.read(file)
+    # Iconv went away in Ruby 2.0; String#encode covers the same ground.
+    # Read the bytes so the sniffing below can look at them directly, then
+    # transcode to UTF-8 for the substitution and back on the way out.
+    data = File.binread(file)
 
-    open(file, "w") do |io|
-      if data[0..1] == "\xFE\xFF"
-        new_data = expand(Iconv.conv('utf-8', 'utf-16', data), variables)
-        io &lt;&lt; Iconv.conv('utf-16', 'utf-8', new_data)
-      elsif mac_roman?(data)
-        io &lt;&lt; expand(Iconv.conv('utf-8', 'mac', data), variables)
-      elsif utf8?(data)
-        io &lt;&lt; expand(data, variables)
-      else
-        io &lt;&lt; data # we probably should not have opened the file for writing
+    encoding =
+      if    data[0, 2] == "\xFE\xFF".b then 'UTF-16BE'
+      elsif mac_roman?(data)           then 'macRoman'
+      elsif utf8?(data)                then 'UTF-8'
       end
-    end
+    return if encoding.nil? # we probably should not have opened it at all
+
+    text = data.encode('UTF-8', encoding)
+    File.binwrite(file, expand(text, variables).encode(encoding))
   end
 
   def mac_roman?(data)
-    data =~ /\xC7(DATE|FULLUSERNAME|ORGANIZATIONNAME|PRODUCTNAME|PROJECTNAMEASIDENTIFIER|PROJECTNAMEASXML|PROJECTNAME|TARGETNAMEASIDENTIFIER|USERNAME|UUID|YEAR)\xC8/
+    data =~ /\xC7(DATE|FULLUSERNAME|ORGANIZATIONNAME|PRODUCTNAME|PROJECTNAMEASIDENTIFIER|PROJECTNAMEASXML|PROJECTNAME|TARGETNAMEASIDENTIFIER|USERNAME|UUID|YEAR)\xC8/n
   end
 
   def utf8?(data)
-    data =~ /«(DATE|FULLUSERNAME|ORGANIZATIONNAME|PRODUCTNAME|PROJECTNAMEASIDENTIFIER|PROJECTNAMEASXML|PROJECTNAME|TARGETNAMEASIDENTIFIER|USERNAME|UUID|YEAR)»/
+    data =~ /\xC2\xAB(DATE|FULLUSERNAME|ORGANIZATIONNAME|PRODUCTNAME|PROJECTNAMEASIDENTIFIER|PROJECTNAMEASXML|PROJECTNAME|TARGETNAMEASIDENTIFIER|USERNAME|UUID|YEAR)\xC2\xBB/n
   end
 
   def process(dir, name)
@@ -76,8 +76,8 @@ module ProcessTemplate
     template_info = Find.find(dir) { |path| break path if path =~ /\/TemplateInfo.plist$/ }
     exit unless File.exist? template_info.to_s
 
-    data = File.read(template_info)
-    data = Iconv.conv('utf-8', 'mac', data) if mac_roman? data
+    data = File.binread(template_info)
+    data = mac_roman?(data) ? data.encode('UTF-8', 'macRoman') : data.force_encoding(Encoding::UTF_8)
 
     plist = OSX::PropertyList.load(data)
 
